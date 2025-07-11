@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Azure DevOps Variable Groups New Tab Opener
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.0.1
 // @description  Opens Azure DevOps Variable Groups in new tabs with proper links
-// @match        https://dev.azure.com/*/*
+// @match        https://dev.azure.com/*/*/_library*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -170,8 +170,21 @@
         console.log(`Successfully loaded ${groups.length} variable groups.`);
     }
 
+    function isVariableGroupsView() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const itemType = urlParams.get('itemType');
+        // If itemType is not present, it defaults to Variable Groups view.
+        // If itemType is present, it must be 'VariableGroups'.
+        return itemType === null || itemType === 'VariableGroups';
+    }
+
     async function main() {
         try {
+            if (!isVariableGroupsView()) {
+                console.log('Not on the Variable Groups view, script will not run.');
+                return;
+            }
+
             console.log('Azure DevOps Variable Groups New Tab Opener starting...');
             
             // Get page data
@@ -195,7 +208,39 @@
         }
     }
 
-    // Start the script
-    main();
+    // --- SPA Navigation Handler ---
+
+    let lastUrl = window.location.href;
+
+    // This function contains the core logic to be executed.
+    function runScript() {
+        if (isVariableGroupsView()) {
+            main();
+        } else {
+            console.log('Not on the Variable Groups view, script will not run.');
+        }
+    }
+
+    // Observe for changes in the DOM, which indicates a potential SPA navigation.
+    const observer = new MutationObserver(() => {
+        const currentUrl = window.location.href;
+        if (currentUrl !== lastUrl) {
+            lastUrl = currentUrl;
+            // If the URL has changed to the library page, run the script.
+            if (currentUrl.includes('/_library')) {
+                runScript();
+            }
+        }
+    });
+
+    // Start observing the body for attribute and child list changes.
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // --- Initial Load ---
+
+    // Run the script on the initial page load if it's the correct page.
+    if (window.location.href.includes('/_library')) {
+        runScript();
+    }
 
 })();
