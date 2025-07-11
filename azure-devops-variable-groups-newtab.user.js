@@ -144,6 +144,12 @@
             <td aria-hidden="true" class="bolt-table-cell-compact bolt-table-cell bolt-list-cell bolt-table-spacer-cell" role="presentation"></td>
         `;
 
+        // Prevent the row's default click event from firing, which causes navigation.
+        // This allows the <a> tag's target="_blank" to work correctly without interference.
+        tr.addEventListener('click', (event) => {
+            event.stopPropagation();
+        });
+
         return tr;
     }
 
