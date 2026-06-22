@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Azure DevOps Variable Groups New Tab Opener
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.2
 // @description  Opens Azure DevOps Variable Groups in new tabs with proper links
 // @match        https://dev.azure.com/*/*/_library*
 // @grant        none
@@ -19,6 +19,8 @@
             SPACER: 'tr.bolt-list-row-spacer'
         }
     };
+
+    let tableObserver = null;
 
     function waitForElement(selector, timeout = CONFIG.TIMEOUT) {
         return new Promise((resolve, reject) => {
@@ -45,25 +47,51 @@
         });
     }
 
+    function injectStyles() {
+        if (document.getElementById('vg-newtab-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'vg-newtab-styles';
+        style.textContent = `
+            a.vg-newtab-link {
+                color: inherit !important;
+                text-decoration: none !important;
+            }
+            a.vg-newtab-link:hover {
+                text-decoration: underline !important;
+                cursor: pointer;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
     function getPageData() {
         const dataScript = document.querySelector(CONFIG.SELECTORS.DATA_PROVIDERS);
-        if (!dataScript) {
-            throw new Error('Data providers script element not found.');
-        }
+        let orgName, projectName;
 
-        try {
-            const pageData = JSON.parse(dataScript.textContent).data;
-            const orgName = pageData["ms.vss-web.page-data"]?.hostName;
-            const projectName = pageData["ms.vss-tfs-web.page-data"]?.project?.name;
-
-            if (!orgName || !projectName) {
-                throw new Error('Organization or project name could not be retrieved.');
+        if (dataScript) {
+            try {
+                const pageData = JSON.parse(dataScript.textContent).data;
+                orgName = pageData["ms.vss-web.page-data"]?.hostName;
+                projectName = pageData["ms.vss-tfs-web.page-data"]?.project?.name;
+            } catch (error) {
+                console.warn('Failed to parse page data from #dataProviders:', error.message);
             }
-
-            return { orgName, projectName };
-        } catch (error) {
-            throw new Error(`Failed to parse page data: ${error.message}`);
         }
+
+        // Fallback to URL parsing if not found in dataProviders
+        if (!orgName || !projectName) {
+            const pathParts = window.location.pathname.split('/').filter(Boolean);
+            if (pathParts.length >= 2) {
+                orgName = orgName || pathParts[0];
+                projectName = projectName || pathParts[1];
+            }
+        }
+
+        if (!orgName || !projectName) {
+            throw new Error('Organization or project name could not be retrieved.');
+        }
+
+        return { orgName, projectName };
     }
 
     async function fetchVariableGroups(orgName, projectName) {
@@ -76,98 +104,86 @@
             }
             
             const data = await response.json();
-            return data.value.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
+            return data.value;
         } catch (error) {
             throw new Error(`Failed to fetch variable groups: ${error.message}`);
         }
     }
 
-    function createTableRow(group, index, orgName, projectName) {
-        const tr = document.createElement('tr');
-        tr.className = `bolt-table-row bolt-list-row ${index === 0 ? 'first-row focused' : ''} single-click-activation`;
-        tr.setAttribute('aria-rowindex', index + 2);
-        tr.setAttribute('data-focuszone', `focuszone-${index + 5}`);
-        tr.setAttribute('data-row-index', index);
-        tr.setAttribute('role', 'row');
-        tr.setAttribute('tabindex', '0');
+    function enhanceTableRows(tbody, groups, orgName, projectName) {
+        if (tableObserver) {
+            tableObserver.disconnect();
+            tableObserver = null;
+        }
 
-        const link = `https://dev.azure.com/${orgName}/${projectName}/_library?itemType=VariableGroups&view=VariableGroupView&variableGroupId=${group.id}&path=${encodeURIComponent(group.name)}`;
-        const modifiedDate = new Date(group.modifiedOn).toLocaleDateString('en-US', { weekday: 'long' });
-        const modifierName = group.modifiedBy?.displayName || 'Unknown';
-        const modifierImageUrl = group.modifiedBy?.id ? `/${orgName}/${projectName}/_api/_common/IdentityImage?id=${group.modifiedBy.id}` : '';
+        const nameToGroupMap = new Map(groups.map(group => [group.name, group]));
 
-        tr.innerHTML = `
-            <td aria-hidden="true" class="bolt-table-cell-compact bolt-table-cell bolt-list-cell bolt-table-spacer-cell" role="presentation"></td>
-            <td aria-colindex="1" class="bolt-table-cell bolt-list-cell" data-column-index="0" role="gridcell">
-                <div class="bolt-table-cell-content flex-row flex-center">
-                    <span class="fluent-icons-enabled">
-                        <span aria-hidden="true" class="vg-item-name-icon flex-noshrink fabric-icon ms-Icon--Variable"></span>
-                    </span>
-                    <a class="lib-item-var-name" href="${link}" target="_blank" rel="noopener noreferrer">
-                        ${group.name}
-                    </a>
-                </div>
-            </td>
-            <td aria-colindex="2" class="bolt-table-cell-side-action bolt-table-cell bolt-list-cell col-1" data-column-index="1">
-                <div class="bolt-table-cell-content-reveal flex-row justify-center">
-                    <div class="bolt-table-button-more bolt-expandable-button inline-flex-row">
-                        <button aria-expanded="false" aria-haspopup="true" aria-label="More options"
-                                class="icon-only bolt-button bolt-icon-button enabled subtle icon-only bolt-focus-treatment"
-                                data-focuszone="focuszone-${index + 11}"
-                                data-is-focusable="true"
-                                role="button"
-                                tabindex="-1"
-                                type="button">
-                            <span class="fluent-icons-enabled">
-                                <span aria-hidden="true" class="small left-icon flex-noshrink fabric-icon ms-Icon--MoreVertical medium"></span>
-                            </span>
-                        </button>
-                    </div>
-                </div>
-            </td>
-            <td aria-colindex="3" class="bolt-table-cell bolt-list-cell" data-column-index="2" role="gridcell">
-                <div class="bolt-table-cell-content flex-row flex-center">
-                    <span class="lib-item-list-date">${modifiedDate}</span>
-                </div>
-            </td>
-            <td aria-colindex="4" class="bolt-table-cell bolt-list-cell" data-column-index="3" role="gridcell">
-                <div class="bolt-table-cell-content flex-row flex-center">
-                    ${modifierImageUrl ? `<img class="lib-item-modifiedby-img" src="${modifierImageUrl}" alt="" />` : ''}
-                    <span class="lib-item-modifiedby-name">${modifierName}</span>
-                </div>
-            </td>
-            <td aria-colindex="5" class="bolt-table-cell bolt-list-cell" data-column-index="4" role="gridcell">
-                <div class="bolt-table-cell-content flex-row flex-center">
-                    <span class="lib-item-desc">${group.description || ''}</span>
-                </div>
-            </td>
-            <td aria-hidden="true" class="bolt-table-cell-compact bolt-table-cell bolt-list-cell bolt-table-spacer-cell" role="presentation"></td>
-        `;
+        const processRows = () => {
+            const rows = tbody.querySelectorAll('tr.bolt-table-row');
+            rows.forEach(row => {
+                // Find the first column cell (usually where the name is)
+                const cell = row.querySelector('[data-column-index="0"]') || row.querySelector('[aria-colindex="2"]');
+                if (!cell) return;
 
-        // Prevent the row's default click event from firing, which causes navigation.
-        // This allows the <a> tag's target="_blank" to work correctly without interference.
-        tr.addEventListener('click', (event) => {
-            event.stopPropagation();
+                // Use TreeWalker to find any text nodes that match the variable group name exactly
+                const walk = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, null, false);
+                let node;
+                const matchedNodes = [];
+                while (node = walk.nextNode()) {
+                    const text = node.textContent.trim();
+                    if (text && nameToGroupMap.has(text)) {
+                        matchedNodes.push({ node, text });
+                    }
+                }
+
+                // Process the matched nodes
+                matchedNodes.forEach(({ node, text }) => {
+                    const group = nameToGroupMap.get(text);
+                    const parent = node.parentElement;
+
+                    // If already processed or already inside a link, skip
+                    if (parent.classList.contains('vg-newtab-link') || parent.closest('.vg-newtab-link')) {
+                        return;
+                    }
+
+                    // Create the replacement link
+                    const link = document.createElement('a');
+                    link.className = 'vg-newtab-link';
+                    link.href = `https://dev.azure.com/${orgName}/${projectName}/_library?itemType=VariableGroups&view=VariableGroupView&variableGroupId=${group.id}&path=${encodeURIComponent(group.name)}`;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+
+                    // Stop click propagation so native row click navigation is not triggered in the same tab
+                    link.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                    });
+
+                    // Replace text node with a wrapped version in a link
+                    parent.replaceChild(link, node);
+                    link.appendChild(node);
+                });
+            });
+        };
+
+        // Run decoration initially
+        processRows();
+
+        // Start observing mutations inside the tbody
+        tableObserver = new MutationObserver(() => {
+            // Temporarily disconnect observer to prevent recursive mutations
+            tableObserver.disconnect();
+            try {
+                processRows();
+            } catch (error) {
+                console.error('Error processing table rows during mutation:', error);
+            } finally {
+                // Reconnect the observer
+                tableObserver.observe(tbody, { childList: true, subtree: true });
+            }
         });
 
-        return tr;
-    }
-
-    function populateTable(tbody, groups, orgName, projectName) {
-        // Clear existing content but preserve spacer
-        const spacer = tbody.querySelector(CONFIG.SELECTORS.SPACER);
-        tbody.innerHTML = '';
-        if (spacer) tbody.appendChild(spacer);
-
-        // Create and append table rows
-        const fragment = document.createDocumentFragment();
-        groups.forEach((group, index) => {
-            const row = createTableRow(group, index, orgName, projectName);
-            fragment.appendChild(row);
-        });
-        tbody.appendChild(fragment);
-
-        console.log(`Successfully loaded ${groups.length} variable groups.`);
+        tableObserver.observe(tbody, { childList: true, subtree: true });
+        console.log('Observation and decoration setup complete on table rows.');
     }
 
     function isVariableGroupsView() {
@@ -187,20 +203,23 @@
 
             console.log('Azure DevOps Variable Groups New Tab Opener starting...');
             
+            // Inject link styles
+            injectStyles();
+
             // Get page data
             const { orgName, projectName } = getPageData();
             console.log(`Organization: ${orgName}, Project: ${projectName}`);
 
             // Wait for table element
             const tbody = await waitForElement(CONFIG.SELECTORS.TBODY);
-            console.log('Table found, loading data...');
+            console.log('Table found, preparing row enhancement...');
 
             // Fetch variable groups from API
             const groups = await fetchVariableGroups(orgName, projectName);
             console.log(`Found ${groups.length} variable groups.`);
 
-            // Populate table
-            populateTable(tbody, groups, orgName, projectName);
+            // Enhance table rows dynamically
+            enhanceTableRows(tbody, groups, orgName, projectName);
 
         } catch (error) {
             console.error('UserScript Error:', error.message);
@@ -218,6 +237,10 @@
             main();
         } else {
             console.log('Not on the Variable Groups view, script will not run.');
+            if (tableObserver) {
+                tableObserver.disconnect();
+                tableObserver = null;
+            }
         }
     }
 
@@ -229,6 +252,12 @@
             // If the URL has changed to the library page, run the script.
             if (currentUrl.includes('/_library')) {
                 runScript();
+            } else {
+                // If we navigated away from the library completely
+                if (tableObserver) {
+                    tableObserver.disconnect();
+                    tableObserver = null;
+                }
             }
         }
     });
